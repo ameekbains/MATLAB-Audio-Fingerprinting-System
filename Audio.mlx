@@ -1,0 +1,143 @@
+% Main function to create audio fingerprints
+function [hashes, songID] = createFingerprints(filename, songID)
+    % Read audio file
+    [audio, fs] = audioread(filename);
+    
+    % Convert to mono
+    if size(audio, 2) == 2
+        audio = mean(audio, 2);
+    end
+    
+    % Resample to 16kHz if necessary
+    targetFs = 16000;
+    if fs ~= targetFs
+        audio = resample(audio, targetFs, fs);
+        fs = targetFs;
+    end
+    
+    % Apply pre-emphasis filter
+    audio = filter([1 -0.97], 1, audio);
+    
+    % Compute spectrogram
+    windowSize = 4096;
+    overlap = 2048;
+    [S, ~, t] = spectrogram(audio, windowSize, overlap, [], fs);
+    S = abs(S);
+    
+    % Find peaks in the spectrogram
+    peaks = findPeaks(S);
+    
+    % Generate hashes from peaks
+    hashes = generateHashes(peaks, t);
+end
+
+% Function to find local maxima in spectrogram
+function peaks = findPeaks(S)
+    % Use image dilation to find local maxima
+    S_padded = padarray(S, [1 1], -inf);
+    neighborhood = true(3,3);
+    dilated = imdilate(S_padded, neighborhood);
+    peaks_mask = (S_padded == dilated(2:end-1, 2:end-1)) & (S > 0);
+    [freq_indices, time_indices] = find(peaks_mask);
+    peaks = [freq_indices, time_indices];
+end
+
+% Function to generate hashes from peaks
+function hashes = generateHashes(peaks, t)
+    % Sort peaks by time
+    [~, order] = sort(peaks(:, 2));
+    peaks = peaks(order, :);
+    
+    hashes = {};
+    maxDeltaTime = 10; % Max time difference in frames
+    
+    for i = 1:size(peaks, 1)
+        f1 = peaks(i, 1);
+        t1 = peaks(i, 2);
+        
+        % Look at next 20 peaks within maxDeltaTime
+        for j = i+1:min(i+20, size(peaks, 1))
+            f2 = peaks(j, 1);
+            t2 = peaks(j, 2);
+            deltaTime = t2 - t1;
+            
+            if deltaTime > maxDeltaTime
+                break;
+            end
+            
+            % Create hash key (f1, f2, deltaTime)
+            hashKey = sprintf('%d_%d_%d', f1, f2, deltaTime);
+            hashes{end+1} = struct('key', hashKey, 'time', t(t1));
+        end
+    end
+end
+
+% Function to match sample against database
+function [matchedID, confidence] = matchSample(sampleFile, database)
+    % Generate sample hashes
+    [sampleHashes, ~] = createFingerprints(sampleFile, 0);
+    
+    % Initialize match counts
+    matchCounts = containers.Map;
+    
+    for i = 1:length(sampleHashes)
+        hash = sampleHashes{i};
+        if isKey(database, hash.key)
+            entries = database(hash.key);
+            sampleTime = hash.time;
+            
+            % Check all database entries with this hash
+            for j = 1:size(entries, 1)
+                songID = entries(j, 1);
+                dbTime = entries(j, 2);
+                timeDiff = sampleTime - dbTime;
+                
+                % Create unique match identifier
+                matchKey = sprintf('%d_%.3f', songID, timeDiff);
+                
+                if isKey(matchCounts, matchKey)
+                    matchCounts(matchKey) = matchCounts(matchKey) + 1;
+                else
+                    matchCounts(matchKey) = 1;
+                end
+            end
+        end
+    end
+    
+    % Find best match
+    matchedID = -1;
+    confidence = 0;
+    
+    if ~isempty(matchCounts)
+        keys = matchCounts.keys;
+        values = matchCounts.values;
+        [maxCount, idx] = max(cell2mat(values));
+        bestKey = keys{idx};
+        parts = strsplit(bestKey, '_');
+        matchedID = str2double(parts{1});
+        confidence = maxCount;
+    end
+end
+
+% Example usage:
+% Create database
+database = containers.Map;
+
+% Add songs to database
+songFiles = {'song1.wav', 'song2.wav', 'song3.wav'};
+for i = 1:length(songFiles)
+    [hashes, ~] = createFingerprints(songFiles{i}, i);
+    for j = 1:length(hashes)
+        hash = hashes{j};
+        if isKey(database, hash.key)
+            database(hash.key) = [database(hash.key); [i, hash.time]];
+        else
+            database(hash.key) = [i, hash.time];
+        end
+    end
+end
+
+% Match sample
+sampleFile = 'sample.wav';
+[matchedID, confidence] = matchSample(sampleFile, database);
+fprintf('Matched song ID: %d with confidence: %d\n', matchedID, confidence);
